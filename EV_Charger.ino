@@ -1,24 +1,27 @@
 /* EV Charger software
+ *  James Fotherby 20th April 2022
  * 
  *  At Power On:
  *    1) Ensure relays are open, configure PWM and ADC for running in the background
- *    2) Perform GFCI Test - if unsuccessful...
+ *    2) Perform GFCI test
  *    3) Enter State_A
  *  
  *  Status A: (No vehicle present) CP: DC +12v          - 
  *  Status B: When a vehicle is plugged in, a diode and resistor pull the DC +12v down to about +9v. We then start our 1khz PWM signal
- *  Status C: When a vehicle is ready and wants to charge it'll pull the positive side of the PWM down further to 6v. This prompts us to close the relays
- *  Status D: Ventilation 3v
+ *  Status C: When a vehicle is ready and wants to charge it'll pull the positive side of the PWM down further to 6v (or 3v). This prompts us to close the relays after another GFCI test
+ *    
+ *   We use timer 1 to output generate our PWM/DC voltage 
+ *   We synchronise our ADC readings to using Timer1 interrupts to read the low and high PWM regions and we continuously read the GFCI ADC 
  *   
- *   We use timer 1 to output our DC voltages and PWM all in one. 
- *   We synchronise our ADC readings to read the low and high PWM regions and we continuously read the GFCI ADC 
- *   We wait in State A and proceed through the states as specified
- *   
- *   If a GFCI is at anypoint detected we open the relays.
- *   
+ *   These are the list of faults that we detect:
+ *    1) STARTUP GFCI TEST FAIL
+ *    2) GFCI DETECT
+ *    3) DIODE FAULT
+ *    4) VOLTAGE CLASS FAULT
+ *    5) START CHARGE GFCI TEST FAIL
+ *     
  *   To Do:
- *    - After a GF error. Reset after 15 minutes up to 4 times.
- *    - After a standard fault, reset after 15 minutes indefintely
+ *    - ?Better error handling
  */
 
 // Pin definitions
@@ -35,6 +38,7 @@
 #define         STATE_A                     1                                   // No EV connected
 #define         STATE_B                     2                                   // EV Connected but not charging
 #define         STATE_C                     3                                   // Charging
+#define         CHARGE_PWM_DUTY             400                                 // Seems to result in 7.2 kW charging rate for me. (Lower numbers = higher duty cycle and charge rates)
 
 #define         _12_VOLTS                   12
 #define         _9_VOLTS                    9
@@ -64,15 +68,14 @@
 #define         NEG_12V_MAX                 327            
 #define         NEG_12V_MIN                 245
 
-#define         GFCI_FAULT_THRESHOLD        250
+#define         GFCI_FAULT_THRESHOLD        250                                 // This is the ADC value that beyond which trips our GFCI detection system
 #define         GFCI_FAULT_ABORT_THRESHOLD  1000                                // If it's taking longer than this to test our GFCI it's clearly failing to work
-#define         FAULT_COUNT_THRESHOLD       100
+#define         FAULT_COUNT_THRESHOLD       100                                 // We have to have 100 successive trivial faults to trip out.
 
-// Global variable definitions
+// Global variable definitions (Globals are bad - I know!)
 volatile int Pilot_Low_ADC;
 volatile int Pilot_High_ADC;
 volatile int GFCI_ADC;
-
 volatile byte ADC_Channel = 0;
 
 void Close_Relays();
@@ -97,14 +100,14 @@ void setup() {
   
   // Configue Pin 10 for PWM output 1kHz.
   pinMode(Pilot_PWM_Pin, OUTPUT); 
-  ICR1 = 1000;                                                                  // A 16MHz XO with a 1/8 prescaler and 1/1000 up/down count leads to a 1kHz PWM wave.
+  ICR1 = 1000;                                                                  // A 16MHz XO with a 1/8 prescaler and 1/1000 up/down (phase correct) count leads to a 1kHz PWM wave.
   TCCR1A = 0b00100010;
   TCCR1B = 0b00010010;                                                          // Timer 1 configured for PWM Phase correct with OC1B enabled non inverting and a 1/8 prescaler
-  TIMSK1 = 0b00100001;                                                          // Enable Interrupts on TCNT1 = OCR1B. (on rising and falling edges of the PWM)    
-  OCR1B = 0;                 
+  TIMSK1 = 0b00100001;                                                          // Enable Interrupts when timer counter at top and bottom (ie. middle of the PWM high and low sections)  
+  OCR1B = 0;                                                                    // Output +12v DC on the pilot
 
   // Configure ADC Module
-  ADMUX = B01000000;                                                            // Set V_Ref to be AVcc, Set to A0
+  ADMUX = B01000000;                                                            // Set V_Ref to be AVcc, Set channel to A0
   ADCSRA = B10001111;                                                           // Enable ADC, Enable conversion complete interrupt, set 128 Prescaler -> ADC Clk = 125KHz 
 
   interrupts();   
@@ -114,7 +117,7 @@ void setup() {
     Fault_Handler(STARTUP_GFCI_TEST_FAIL);
   }
 
-//  OCR1B = 500;
+//  OCR1B = CHARGE_PWM_DUTY;
 //  while(1)  {
 //    delay(100);
 //    Serial.print(Pilot_Low_ADC); Serial.print(", "); Serial.print(Pilot_High_ADC); Serial.print(", "); Serial.println(GFCI_ADC);
@@ -149,7 +152,7 @@ void loop() {
   switch (Current_State)  {
     case STATE_A:
       if(PVC == _9_VOLTS or PVC == _6_VOLTS or PVC == _3_VOLTS)  {
-        OCR1B = 500;
+        OCR1B = CHARGE_PWM_DUTY;
         digitalWrite(Indicator_LED, HIGH);
         Serial.println("State B");        
         Current_State = STATE_B;
@@ -230,7 +233,7 @@ byte Read_Pilot_Voltage()
   }  
 }
 
-byte GFCI_Test()
+byte GFCI_Test()                                                                // This routine energises the test coil on the current transformer using a 50Hz square wave
 {
   pinMode(GFCI_Test_Pin, OUTPUT);
   delay(100);
@@ -294,7 +297,7 @@ void Open_Relays()
 ISR(TIMER1_OVF_vect)
 {
   static byte selector = 0;
-  if(ADCSRA & 0b01000000)
+  if(ADCSRA & 0b01000000)                                                       // If the ADC is still performing a conversion (it shouldn't be) then return
     return;
       
   if(selector && 1)  {
