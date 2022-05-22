@@ -20,8 +20,11 @@
  *    4) VOLTAGE CLASS FAULT
  *    5) START CHARGE GFCI TEST FAIL
  *     
- *   To Do:
- *    - ?Better error handling
+ *   Changes:
+ *    - 4/5/2022 - Added 4 second WDT reset
+ *    - 22/5/2022 - Fixed bug in Timer interrupt which alternates the ADC channels 
+ *                - changed required successive faults from 100 to 10
+ *
  */
 
 // Pin definitions
@@ -38,7 +41,7 @@
 #define         STATE_A                     1                                   // No EV connected
 #define         STATE_B                     2                                   // EV Connected but not charging
 #define         STATE_C                     3                                   // Charging
-#define         CHARGE_PWM_DUTY             400                                 // Seems to result in 7.2 kW charging rate for me. (Lower numbers = higher duty cycle and charge rates)
+#define         CHARGE_PWM_DUTY             350                                 // Seems to result in 7.4 kW charging rate for me. (Lower numbers = higher duty cycle and charge rates)
 
 #define         _12_VOLTS                   12
 #define         _9_VOLTS                    9
@@ -69,8 +72,11 @@
 #define         NEG_12V_MIN                 245
 
 #define         GFCI_FAULT_THRESHOLD        250                                 // This is the ADC value that beyond which trips our GFCI detection system
-#define         GFCI_FAULT_ABORT_THRESHOLD  1000                                // If it's taking longer than this to test our GFCI it's clearly failing to work
-#define         FAULT_COUNT_THRESHOLD       100                                 // We have to have 100 successive trivial faults to trip out.
+#define         GFCI_FAULT_ABORT_THRESHOLD  500                                 // If it's taking longer than this to test our GFCI it's clearly failing to work
+#define         FAULT_COUNT_THRESHOLD       10                                  // We have to have 10 successive trivial faults to trip out.
+
+// Librarys
+#include <avr/wdt.h>
 
 // Global variable definitions (Globals are bad - I know!)
 volatile int Pilot_Low_ADC;
@@ -88,7 +94,7 @@ void Fault_Handler(byte Fault_type);
 //  ------------------------------------------------------------------------------------------------------
 //  ######################################################################################################
 void setup() {
-  delay(1000);  
+  delay(500);  
   noInterrupts(); 
   
   Serial.begin(115200);
@@ -109,6 +115,10 @@ void setup() {
   // Configure ADC Module
   ADMUX = B01000000;                                                            // Set V_Ref to be AVcc, Set channel to A0
   ADCSRA = B10001111;                                                           // Enable ADC, Enable conversion complete interrupt, set 128 Prescaler -> ADC Clk = 125KHz 
+
+  // Enable Watch Dog
+  wdt_enable(WDTO_4S);
+  wdt_reset();
 
   interrupts();   
   
@@ -133,7 +143,8 @@ void setup() {
 //  ######################################################################################################
 void loop() {
   static byte Current_State = STATE_A;  
-  static byte PVC;  
+  static byte PVC; 
+  wdt_reset(); 
   delay(10); 
 
   PVC = Read_Pilot_Voltage();                                                   // PVC = Pilot Voltage Classification
@@ -275,6 +286,8 @@ void Fault_Handler(byte Fault_type)
     digitalWrite(Indicator_LED, HIGH);
     delay(100); 
     digitalWrite(Indicator_LED, LOW);
+
+    wdt_reset();
   }
 }
 
@@ -300,18 +313,18 @@ ISR(TIMER1_OVF_vect)
   if(ADCSRA & 0b01000000)                                                       // If the ADC is still performing a conversion (it shouldn't be) then return
     return;
       
-  if(selector && 1)  {
+  if(selector)  {
     ADMUX = B01000000;     
     ADCSRA |= B01000000;
     ADC_Channel = 0;    
+    selector = 0;
   } 
   else  {     
     ADMUX = B01000001;
     ADCSRA |= B01000000;
-    ADC_Channel = 1;     
+    ADC_Channel = 1;  
+    selector = 1;   
   }
-
-  selector++;
 }
 
 // This code runs when the PWM signal is in the middle of its high period
@@ -321,18 +334,18 @@ ISR(TIMER1_CAPT_vect)
   if(ADCSRA & 0b01000000)
     return;
   
-  if(selector && 1)  {
+  if(selector)  {
     ADMUX = B01000000;     
     ADCSRA |= B01000000;
-    ADC_Channel = 0;    
+    ADC_Channel = 0; 
+    selector = 0;   
   } 
   else  {     
     ADMUX = B01000001;
     ADCSRA |= B01000000;
-    ADC_Channel = 2;     
+    ADC_Channel = 2; 
+    selector = 1;     
   }
-
-  selector++;
 }
 
 // Interrupt service routine for ADC conversion complete
