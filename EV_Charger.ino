@@ -21,9 +21,10 @@
  *    5) START CHARGE GFCI TEST FAIL
  *     
  *   Changes:
- *    - 4/5/2022 - Added 4 second WDT reset
+ *    - 4/5/2022  - Added 4 second WDT reset
  *    - 22/5/2022 - Fixed bug in Timer interrupt which alternates the ADC channels 
  *                - changed required successive faults from 100 to 10
+ *    - 8/1/2024  - Increased GFCI_FAULT_THRESHOLD from 250 -> 300 because of occasional trips occuring with a Renault Zoe ZE50 2020
  *
  */
 
@@ -71,7 +72,7 @@
 #define         NEG_12V_MAX                 327            
 #define         NEG_12V_MIN                 245
 
-#define         GFCI_FAULT_THRESHOLD        250                                 // This is the ADC value that beyond which trips our GFCI detection system
+#define         GFCI_FAULT_THRESHOLD        300                                 // This is the ADC value that beyond which trips our GFCI detection system
 #define         GFCI_FAULT_ABORT_THRESHOLD  500                                 // If it's taking longer than this to test our GFCI it's clearly failing to work
 #define         FAULT_COUNT_THRESHOLD       10                                  // We have to have 10 successive trivial faults to trip out.
 
